@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
-use hashbrown::{DefaultHashBuilder, HashTable};
+use hashbrown::HashTable;
 
-use crate::{Gcra, Instant};
+use crate::{DefaultHashBuilder, Gcra, Instant};
 
 const SHARDS: usize = 4096;
 const SHARDS_PER_CHUNK: usize = 64;

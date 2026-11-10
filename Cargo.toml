@@ -21,8 +21,10 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 coarsetime = { version = "0.1.38", default-features = false, optional = true }
-hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
+hashbrown = { version = "0.17.1", default-features = false }
+rapidhash = { version = "4.5.1", package = "rapidhash", optional = true }
 
 [features]
-default = ["coarsetime"]
+default = ["coarsetime", "default-hasher"]
 coarsetime = ["dep:coarsetime"]
+default-hasher = ["dep:rapidhash"]
