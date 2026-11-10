@@ -21,6 +21,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 coarsetime = { version = "0.1.38", default-features = false, optional = true }
+hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
 
 [features]
 default = ["coarsetime"]
