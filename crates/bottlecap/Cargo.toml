@@ -1,0 +1,19 @@
+[package]
+name = "bottlecap"
+version = "0.0.0"
+edition.workspace = true
+readme = "../../README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["coarsetime", "default-hasher"]
+coarsetime = ["dep:coarsetime"]
+default-hasher = ["dep:rapidhash"]
+
+[dependencies]
+coarsetime = { workspace = true, optional = true }
+hashbrown.workspace = true
+rapidhash = { workspace = true, optional = true }
