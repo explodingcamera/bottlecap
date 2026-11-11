@@ -17,3 +17,6 @@ default-hasher = ["dep:rapidhash"]
 coarsetime = { workspace = true, optional = true }
 hashbrown.workspace = true
 rapidhash = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["time"] }

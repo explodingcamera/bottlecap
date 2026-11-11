@@ -3,6 +3,29 @@ use std::time::Duration;
 use crate::Gcra;
 
 /// A request rate and burst size.
+///
+/// The rate controls how quickly allowance refills. The burst is the maximum
+/// number of requests available at once, and a new limiter starts with that
+/// allowance full. By default, the burst equals the request count.
+///
+/// ```
+/// use bottlecap::Quota;
+///
+/// let quota = Quota::per_second(10).with_burst(5);
+/// ```
+///
+/// With this quota:
+/// - Five requests can be made immediately.
+/// - One request of allowance returns every 100 milliseconds.
+/// - Unused allowance builds up to five requests, never more.
+///
+/// Changing the burst does not change the refill rate. Limits refill continuously,
+/// rather than resetting a counter at the end of each second.
+///
+/// # Panics
+///
+/// Configuration methods panic for a zero period or if the quota exceeds the
+/// timestamp range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Quota(pub(crate) Gcra);
 

@@ -15,6 +15,12 @@ pub struct KeyedLimiter<K, S = DefaultHashBuilder, C = DefaultClock> {
 impl<K: Eq + Hash> KeyedLimiter<K> {
     /// Create per-key allowances without a fixed key limit.
     /// Use `with_max_keys` to cap stored keys, or call `prune` periodically.
+    ///
+    /// ```
+    /// use bottlecap::{KeyedLimiter, Quota};
+    /// let clients = KeyedLimiter::new(Quota::per_second(10));
+    /// assert!(clients.check(&"alice").is_ok());
+    /// ```
     pub fn new(quota: Quota) -> Self {
         Self::with_hasher(quota, DefaultHashBuilder::default())
     }
@@ -23,6 +29,13 @@ impl<K: Eq + Hash> KeyedLimiter<K> {
 impl<K: Eq + Hash, S: BuildHasher + Clone> KeyedLimiter<K, S> {
     /// Create per-key allowances with a custom hash builder.
     /// Use collision-resistant hashing for untrusted keys.
+    ///
+    /// ```
+    /// use bottlecap::{KeyedLimiter, Quota};
+    /// use std::collections::hash_map::RandomState;
+    /// let clients = KeyedLimiter::with_hasher(Quota::per_second(10), RandomState::new());
+    /// assert!(clients.check(&"alice").is_ok());
+    /// ```
     pub fn with_hasher(quota: Quota, hasher: S) -> Self {
         Self {
             quota: quota.0,
@@ -69,6 +82,14 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
 
     /// Forget a key's allowance, returning whether it was stored.
     /// Its next check starts full, subject to the key capacity.
+    ///
+    /// ```
+    /// use bottlecap::{KeyedLimiter, Quota};
+    /// let clients = KeyedLimiter::new(Quota::per_minute(1));
+    /// assert!(clients.check(&"alice").is_ok());
+    /// assert!(clients.reset(&"alice"));
+    /// assert!(clients.check(&"alice").is_ok());
+    /// ```
     pub fn reset(&self, key: &K) -> bool {
         self.state.reset(key)
     }
