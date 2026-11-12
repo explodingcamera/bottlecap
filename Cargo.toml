@@ -1,7 +1,35 @@
+[package]
+name = "bottlecap-dev"
+version = "0.0.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["coarsetime", "default-hasher"]
+coarsetime = ["bottlecap/coarsetime"]
+default-hasher = ["bottlecap/default-hasher"]
+
+[[bench]]
+harness = false
+name = "limiter"
+
+[[bench]]
+harness = false
+name = "memory"
+
+[dev-dependencies]
+bottlecap.workspace = true
+criterion = { version = "0.8.2", features = ["html_reports"] }
+governor = "0.10.4"
+rapidhash.workspace = true
+ratelimit = "2.0.0"
+
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/bottlecap"]
+default-members = [".", "crates/bottlecap"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +39,7 @@ repository = "https://github.com/explodingcamera/bottlecap"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+bottlecap = { path = "crates/bottlecap", version = "0.0.0", default-features = false }
 coarsetime = { version = "0.1.38", default-features = false }
 hashbrown = { version = "0.17.1", default-features = false }
 rapidhash = "4.5.1"
