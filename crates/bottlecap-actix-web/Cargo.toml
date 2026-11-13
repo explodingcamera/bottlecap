@@ -1,0 +1,24 @@
+[package]
+name = "bottlecap-actix-web"
+version.workspace = true
+description = "Bottlecap rate-limit middleware for Actix Web"
+keywords = ["rate-limit", "middleware", "actix-web", "throttle"]
+categories = ["web-programming", "network-programming"]
+edition.workspace = true
+rust-version.workspace = true
+homepage = "https://github.com/explodingcamera/bottlecap/tree/main/crates/bottlecap-actix-web"
+repository.workspace = true
+license.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+actix-web.workspace = true
+bottlecap.workspace = true
+pin-project-lite.workspace = true
+
+[features]
+default = ["coarsetime", "default-hasher"]
+default-hasher = ["bottlecap/default-hasher"]
+coarsetime = ["bottlecap/coarsetime"]

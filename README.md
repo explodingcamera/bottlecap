@@ -7,7 +7,7 @@
 A fast, memory-efficient rate limiter for Rust.
 
 ```rust
-use bottlecap::{KeyedLimiter, Limiter, Quota};
+use bottlecap::{Limiter, Quota};
 let quota = Quota::per_second(10).with_burst(5);
 let limiter = Limiter::new(quota);
 
@@ -15,12 +15,17 @@ let limiter = Limiter::new(quota);
 assert!(limiter.check().is_ok());
 assert!(limiter.check_n(2).is_ok());
 
-// Check without consuming allowance.
+// Check without using a request.
 assert!(limiter.peek().is_ok());
 
 // Wait for the next free request
 limiter.wait(tokio::time::sleep).await?;
 ```
+
+## Integrations
+
+- [bottlecap-tower](https://crates.io/crates/bottlecap-tower): Middleware for [Tower](https://docs.rs/tower), [Axum](https://docs.rs/axum), and [Tonic](https://docs.rs/tonic)
+- [bottlecap-actix-web](https://crates.io/crates/bottlecap-actix-web): Middleware for [Actix Web](https://docs.rs/actix-web)
 
 ## License
 

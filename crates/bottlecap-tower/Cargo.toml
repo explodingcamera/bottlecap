@@ -1,0 +1,36 @@
+[package]
+name = "bottlecap-tower"
+version.workspace = true
+description = "Bottlecap rate-limit middleware for Tower, Axum, and Tonic"
+keywords = ["rate-limit", "middleware", "tower", "axum", "tonic"]
+categories = ["web-programming", "network-programming"]
+edition.workspace = true
+rust-version.workspace = true
+homepage = "https://github.com/explodingcamera/bottlecap/tree/main/crates/bottlecap-tower"
+repository.workspace = true
+license.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+bottlecap.workspace = true
+pin-project-lite.workspace = true
+
+axum = { workspace = true, optional = true }
+http.workspace = true
+tonic = { workspace = true, optional = true }
+tower.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.54", features = ["full"] }
+tokio-stream = { version = "0.1", default-features = false, features = ["net"] }
+tonic = { workspace = true, features = ["channel", "codegen", "router"] }
+tonic-health = "0.14"
+
+[features]
+default = ["coarsetime", "default-hasher"]
+default-hasher = ["bottlecap/default-hasher"]
+axum = ["dep:axum"]
+coarsetime = ["bottlecap/coarsetime"]
+tonic = ["dep:tonic"]

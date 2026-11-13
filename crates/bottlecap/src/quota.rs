@@ -4,34 +4,51 @@ use crate::Gcra;
 
 /// A request rate and burst size.
 ///
-/// The rate controls how quickly allowance refills. The burst is the maximum
-/// number of requests available at once, and a new limiter starts with that
-/// allowance full. By default, the burst equals the request count.
+/// The rate determines how quickly requests become available, while the burst
+/// is the maximum number you can use at once.
 ///
 /// ```
 /// use bottlecap::Quota;
+/// use std::time::Duration;
 ///
-/// let quota = Quota::per_second(10).with_burst(5);
+/// let per_second = Quota::per_second(10);
+/// let per_minute = Quota::per_minute(100);
+/// let per_hour = Quota::per_hour(1_000);
+/// let custom = Quota::per(Duration::from_secs(30), 20);
 /// ```
 ///
-/// With this quota:
-/// - Five requests can be made immediately.
-/// - One request of allowance returns every 100 milliseconds.
-/// - Unused allowance builds up to five requests, never more.
+/// ## Bursts
 ///
-/// Changing the burst does not change the refill rate. Limits refill continuously,
-/// rather than resetting a counter at the end of each second.
+/// With a rate of ten requests per second and a burst of five, you can make five
+/// requests immediately before waiting 100 ms for the next one. Unused requests
+/// accumulate up to five, so waiting longer does not let you save up more requests.
 ///
-/// # Panics
+/// ```
+/// use bottlecap::{Instant, Limiter, Quota};
+/// use std::time::Duration;
 ///
-/// Configuration methods panic for a zero period or if the quota exceeds the
-/// timestamp range.
+/// let limiter = Limiter::new(Quota::per_second(10).with_burst(5));
+/// let now = Instant::now();
+///
+/// // All five requests can be made at the same time.
+/// assert!(limiter.check_n_at(5, now).is_ok());
+/// assert_eq!(limiter.check_at(now), Err(Duration::from_millis(100)));
+///
+/// // After 100 ms, one more request is available.
+/// assert!(limiter.check_at(now + Duration::from_millis(100)).is_ok());
+///
+/// // Even after a whole second, only five requests can be saved up.
+/// assert_eq!(limiter.remaining_at(now + Duration::from_secs(1)), 5);
+/// ```
+///
+/// Without [`with_burst`](Self::with_burst), the burst equals the request count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Quota(pub(crate) Gcra);
 
 impl Quota {
     /// Allow `requests` per `period`, replenishing continuously.
     /// Refill intervals round up to the nearest nanosecond.
+    /// Panics if `period` is zero or the quota exceeds the timestamp range.
     pub fn per(period: Duration, requests: u32) -> Self {
         assert!(!period.is_zero(), "quota period must be positive");
         if requests == 0 {
@@ -61,6 +78,7 @@ impl Quota {
     }
 
     /// Set how many requests can be allowed at once, without changing the refill rate.
+    /// Panics if the burst exceeds the timestamp range.
     pub fn with_burst(self, burst: u32) -> Self {
         if self.0.interval == 0 {
             return self;
@@ -68,13 +86,12 @@ impl Quota {
         Self(Gcra::new(self.interval(), burst))
     }
 
-    /// Return the interval between replenished requests.
-    /// Returns zero for a disabled quota.
+    /// The interval between replenished requests, or zero for a disabled quota.
     pub fn interval(self) -> Duration {
         Duration::from_nanos(self.0.interval)
     }
 
-    /// Return the maximum burst size.
+    /// The maximum burst size.
     pub fn burst(self) -> u32 {
         if self.0.interval == 0 {
             return 0;

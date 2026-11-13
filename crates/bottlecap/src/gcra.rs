@@ -12,7 +12,7 @@ pub(crate) struct Gcra {
 }
 
 impl Gcra {
-    /// Return available requests at the given timestamp.
+    /// Available requests at the given timestamp.
     pub(crate) fn remaining(&self, now: u64, arrival: u64) -> u32 {
         if self.interval == 0 {
             return 0;
@@ -77,7 +77,7 @@ impl Gcra {
         }
     }
 
-    /// Atomically consume allowance without updating state on rejection.
+    /// Atomically update the timestamp when a check succeeds.
     #[inline]
     pub(crate) fn check_atomic(&self, now: u64, state: &AtomicU64) -> Result<(), Duration> {
         let mut arrival = state.load(Relaxed);

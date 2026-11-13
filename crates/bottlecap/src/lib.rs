@@ -5,7 +5,7 @@
 //!
 //! ## Quotas
 //!
-//! A [`Quota`] sets how quickly allowance refills and how much can accumulate.
+//! A [`Quota`] sets the request rate and maximum burst size.
 //!
 //! ```
 //! # use bottlecap::Quota;
@@ -13,8 +13,8 @@
 //!     .with_burst(5); // Allow up to five requests at once.
 //! ```
 //!
-//! A new limiter starts with the full burst available. Without `with_burst`,
-//! the burst defaults to the request count, ten in this example.
+//! This allows five requests immediately, then one more every 100 ms.
+//! Without `with_burst`, the limiter would start with ten requests available.
 //!
 //! ## Shared limit
 //!
@@ -30,7 +30,7 @@
 //! assert!(limiter.check().is_ok());
 //! assert!(limiter.check_n(2).is_ok());
 //!
-//! // Check without consuming allowance.
+//! // Check without using a request.
 //! assert!(limiter.peek().is_ok());
 //!
 //! // Wait for the next free request
@@ -41,7 +41,7 @@
 //!
 //! ## Per-key limits
 //!
-//! [`KeyedLimiter`] gives each key its own allowance. Keys can be IP addresses,
+//! [`KeyedLimiter`] gives each key its own rate limit. Keys can be IP addresses,
 //! user IDs, or any other hashable value.
 //!
 //! ```no_run
@@ -59,8 +59,19 @@
 //! # }
 //! ```
 //!
-//! To use a different hashing algorithm, pass a hash builder to
-//! [`KeyedLimiter::with_hasher`].
+//! ## Features
+//!
+//! - `coarsetime` (default): use a coarse monotonic clock instead of
+//!   [`std::time::Instant`].
+//! - `default-hasher` (default): use [rapidhash](https://docs.rs/rapidhash) for keyed lookups.
+//!
+//! ## Integrations
+//!
+//! - [`bottlecap-tower`](https://docs.rs/bottlecap-tower) supports
+//!   [Tower](https://docs.rs/tower), [Axum](https://docs.rs/axum), and
+//!   [Tonic](https://docs.rs/tonic).
+//! - [`bottlecap-actix-web`](https://docs.rs/bottlecap-actix-web) supports
+//!   [Actix Web](https://docs.rs/actix-web).
 
 mod gcra;
 mod instant;

@@ -11,7 +11,7 @@ pub struct Instant(pub(crate) u64);
 ///
 /// Closures returning [`Instant`] also implement this trait.
 pub trait Clock {
-    /// Sample the current time.
+    /// The current time.
     fn now(&self) -> Instant;
 }
 
@@ -23,7 +23,8 @@ impl<F: Fn() -> Instant> Clock for F {
 
 /// The system clock used by default.
 ///
-/// Uses coarsetime by default, or std time with default features disabled.
+/// Uses a coarse monotonic clock when `coarsetime` is enabled, or
+/// [`std::time::Instant`] otherwise.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultClock;
 
@@ -51,7 +52,7 @@ fn clock_origin() -> &'static ClockOrigin {
 }
 
 impl Instant {
-    /// Sample the current time from the selected clock.
+    /// The current time from the selected clock.
     #[inline]
     pub fn now() -> Self {
         #[cfg(feature = "coarsetime")]
@@ -64,13 +65,13 @@ impl Instant {
         }
     }
 
-    /// Return the time elapsed since this timestamp.
+    /// Time elapsed since this timestamp.
     #[inline]
     pub fn elapsed(&self) -> Duration {
         Self::now().duration_since(*self)
     }
 
-    /// Return the duration since an earlier timestamp, saturating at zero.
+    /// The time since `earlier`, or zero if `earlier` is later than this timestamp.
     #[inline]
     pub fn duration_since(&self, earlier: Self) -> Duration {
         Duration::from_nanos(self.0.saturating_sub(earlier.0))
@@ -94,7 +95,7 @@ impl Instant {
 }
 
 impl From<std::time::Instant> for Instant {
-    /// Convert from the shared std clock origin, saturating at either range bound.
+    /// Convert a std timestamp to a limiter timestamp, saturating at the supported bounds.
     #[inline]
     fn from(instant: std::time::Instant) -> Self {
         let elapsed = instant.saturating_duration_since(clock_origin().standard);
@@ -104,7 +105,7 @@ impl From<std::time::Instant> for Instant {
 
 #[cfg(feature = "coarsetime")]
 impl From<coarsetime::Instant> for Instant {
-    /// Convert from the shared coarse clock origin, saturating earlier times at zero.
+    /// Convert a coarse timestamp to a limiter timestamp, saturating times before the origin at zero.
     #[inline]
     fn from(instant: coarsetime::Instant) -> Self {
         Self(instant.duration_since(clock_origin().coarse).as_nanos())

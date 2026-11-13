@@ -128,7 +128,7 @@ impl<K: Eq + Hash> Bucket<K> {
     }
 
     /// Insert an absent key. The caller must exclude concurrent insertions and
-    /// check for an existing entry to avoid discarding its consumed allowance.
+    /// check for an existing entry to avoid resetting its rate-limit state.
     fn insert<S: BuildHasher>(&mut self, entry: Entry<K>, hasher: &S) {
         if matches!(self, Self::Small(bucket) if bucket.entries.len() == MAX_VECTOR_KEYS) {
             self.reserve(MAX_VECTOR_KEYS + 1, hasher);
@@ -334,8 +334,8 @@ impl<K: Eq + Hash, S: BuildHasher> ShardedStore<K, S> {
 impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
     /// Serialize admission of unknown keys to enforce an exact global key limit.
     /// Recheck after locking because another check may have inserted the key.
-    /// Reject timestamps older than the last reclamation to prevent recreating
-    /// a full bucket for a time when the removed entry still had consumed allowance.
+    /// Reject timestamps older than the last reclamation so a removed key cannot
+    /// regain requests before its original refill time.
     #[cold]
     #[inline(never)]
     fn check_missing<const CONSUME: bool>(
@@ -403,7 +403,7 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
         Ok(())
     }
 
-    /// Reclaim fully replenished entries, whose absence preserves allowance.
+    /// Remove fully replenished entries without changing the effective rate limits.
     /// The caller must hold the insertion mutex, and shard locks exclude
     /// checks while deciding which timestamps are safe to discard.
     ///
@@ -450,12 +450,12 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
         removed
     }
 
-    /// Return the number of stored keys, including idle keys not yet pruned.
+    /// The number of stored keys, including idle keys not yet pruned.
     pub(crate) fn len(&self) -> usize {
         self.insertion.lock().expect("limiter state poisoned").used
     }
 
-    /// Read a key's remaining allowance without inserting it or reclaiming other keys.
+    /// Read a key's remaining requests without inserting it or reclaiming other keys.
     pub(crate) fn remaining_at(&self, quota: &Gcra, key: &K, now: Instant) -> u32 {
         let hash = self.hasher.hash_one(key);
         let index = (hash >> 32) as usize & (self.shards.len() * SHARDS_PER_CHUNK - 1);
@@ -471,8 +471,8 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
         quota.remaining(now.0, 0)
     }
 
-    /// Forget a key's allowance, returning whether it was stored.
-    /// Unlike pruning, this deliberately discards consumed allowance. Updating
+    /// Remove a key's rate-limit state, returning whether it was stored.
+    /// Unlike pruning, this deliberately resets the rate limit. Updating
     /// the key count under the insertion mutex makes the freed slot reusable.
     pub(crate) fn reset(&self, key: &K) -> bool {
         let hash = self.hasher.hash_one(key);
@@ -494,9 +494,6 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
     /// Existing keys above a newly lowered limit remain until they can be pruned.
     /// Only an empty store can resize its directory, since resizing would change
     /// shard placement for existing keys.
-    ///
-    /// # Panics
-    ///
     /// Panics if `max_keys` is zero.
     pub(crate) fn with_max_keys(mut self, max_keys: usize) -> Self {
         assert!(max_keys > 0, "key capacity must be positive");
@@ -555,7 +552,7 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
         self.prune_locked(&mut capacity, now.0, None)
     }
 
-    /// Check allowance without taking the insertion mutex for existing keys.
+    /// Check requests without taking the insertion mutex for existing keys.
     /// A shard read lock protects timestamps during atomic request-budget updates.
     /// Release that lock before entering the missing-key path to preserve lock order.
     #[inline]
@@ -835,7 +832,7 @@ mod tests {
         for key in 33..57 {
             assert!(limiter.check_at(&Key(key), later).is_ok());
         }
-        // Reset also compacts dense buckets, without losing other keys' allowance.
+        // Reset also compacts dense buckets without resetting other keys' limits.
         for key in 33..57 {
             assert!(limiter.reset(&Key(key)));
         }

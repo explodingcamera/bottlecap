@@ -21,11 +21,18 @@ harness = false
 name = "memory"
 
 [dev-dependencies]
+actix-web.workspace = true
+axum = { workspace = true, features = ["http1"] }
 bottlecap.workspace = true
-criterion = { version = "0.8.2", features = ["html_reports"] }
-governor = "0.10.4"
+bottlecap-actix-web.workspace = true
+bottlecap-tower = { workspace = true, features = ["axum", "tonic"] }
+criterion = { version = "0.8", features = ["html_reports"] }
+governor = "0.10"
 rapidhash.workspace = true
-ratelimit = "2.0.0"
+ratelimit = "2.0"
+tokio = { version = "1.54", features = ["full"] }
+tonic = { workspace = true, features = ["router"] }
+tonic-health = "0.14"
 
 [workspace]
 resolver = "3"
@@ -36,12 +43,20 @@ default-members = [".", "crates/bottlecap"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
-homepage = "https://github.com/explodingcamera/bottlecap"
 repository = "https://github.com/explodingcamera/bottlecap"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-bottlecap = { path = "crates/bottlecap", version = "0.0.0", default-features = false }
-coarsetime = { version = "0.1.38", default-features = false }
-hashbrown = { version = "0.17.1", default-features = false }
+bottlecap = { path = "crates/bottlecap", version = "0.1", default-features = false }
+bottlecap-actix-web = { path = "crates/bottlecap-actix-web", version = "0.1" }
+bottlecap-tower = { path = "crates/bottlecap-tower", version = "0.1" }
+coarsetime = { version = "0.1", default-features = false }
+hashbrown = { version = "0.17", default-features = false }
 rapidhash = "4.5.1"
+
+actix-web = { version = "4", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["tokio"] }
+http = { version = "1.5", default-features = false, features = ["std"] }
+pin-project-lite = "0.2"
+tonic = { version = "0.14", default-features = false, features = ["server"] }
+tower = { version = "0.5", default-features = false }

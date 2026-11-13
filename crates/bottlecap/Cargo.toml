@@ -1,13 +1,14 @@
 [package]
 name = "bottlecap"
-version = "0.0.0"
+version.workspace = true
+description = "A fast, memory-efficient rate limiter for Rust"
+keywords = ["rate-limit", "rate-limiter", "throttle", "gcra"]
+categories = ["algorithms", "concurrency", "network-programming"]
 edition.workspace = true
 rust-version.workspace = true
 readme = "../../README.md"
-homepage.workspace = true
 repository.workspace = true
 license.workspace = true
-publish = false
 
 [features]
 default = ["coarsetime", "default-hasher"]

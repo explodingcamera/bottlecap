@@ -6,6 +6,9 @@ use crate::store::ShardedStore;
 use crate::{Clock, DefaultClock, DefaultHashBuilder, Gcra, Instant, Quota, Rejection};
 
 /// A rate limiter that tracks a separate limit for each key.
+///
+/// Call [`Self::prune`] periodically to remove idle keys. With a key limit,
+/// new requests also reclaim idle keys when storage is full.
 pub struct KeyedLimiter<K, S = DefaultHashBuilder, C = DefaultClock> {
     quota: Gcra,
     state: ShardedStore<K, S>,
@@ -13,8 +16,7 @@ pub struct KeyedLimiter<K, S = DefaultHashBuilder, C = DefaultClock> {
 }
 
 impl<K: Eq + Hash> KeyedLimiter<K> {
-    /// Create per-key allowances without a fixed key limit.
-    /// Use `with_max_keys` to cap stored keys, or call `prune` periodically.
+    /// Create a limiter with a separate rate limit for each key.
     ///
     /// ```
     /// use bottlecap::{KeyedLimiter, Quota};
@@ -27,7 +29,8 @@ impl<K: Eq + Hash> KeyedLimiter<K> {
 }
 
 impl<K: Eq + Hash, S: BuildHasher + Clone> KeyedLimiter<K, S> {
-    /// Create per-key allowances with a custom hash builder.
+    /// Create a keyed limiter with a custom hash builder.
+    ///
     /// Use collision-resistant hashing for untrusted keys.
     ///
     /// ```
@@ -46,22 +49,22 @@ impl<K: Eq + Hash, S: BuildHasher + Clone> KeyedLimiter<K, S> {
 }
 
 impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, C> {
-    /// Return the rate and burst configuration shared by all keys.
+    /// The rate and burst configuration shared by all keys.
     pub fn quota(&self) -> Quota {
         Quota(self.quota)
     }
 
-    /// Return a key's available requests, without consuming allowance or storing the key.
+    /// The number of requests available for a key, without storing it.
     pub fn remaining(&self, key: &K) -> u32 {
         self.remaining_at(key, self.clock.now())
     }
 
-    /// Return a key's available requests using a caller-supplied current time.
+    /// A key's available requests at a caller-supplied time.
     pub fn remaining_at(&self, key: &K, now: Instant) -> u32 {
         self.state.remaining_at(&self.quota, key, now)
     }
 
-    /// Use a custom clock without changing stored keys or consumed allowance.
+    /// Switch to a custom clock without resetting limits or removing keys.
     pub fn with_clock<D: Clock>(self, clock: D) -> KeyedLimiter<K, S, D> {
         KeyedLimiter {
             quota: self.quota,
@@ -70,18 +73,20 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
         }
     }
 
-    /// Return the number of stored keys, including idle keys not yet pruned.
+    /// The number of stored keys, including idle keys not yet pruned.
     pub fn len(&self) -> usize {
         self.state.len()
     }
 
-    /// Return whether no keys are stored.
+    /// True if no keys are stored.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Forget a key's allowance, returning whether it was stored.
-    /// Its next check starts full, subject to the key capacity.
+    /// Remove a key and reset its rate limit.
+    ///
+    /// Returns `true` if the key was stored. Its next check starts with the maximum
+    /// number of requests available, provided there is room for the key.
     ///
     /// ```
     /// use bottlecap::{KeyedLimiter, Quota};
@@ -94,49 +99,51 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
         self.state.reset(key)
     }
 
-    /// Cap stored keys, rejecting unknown keys while storage is full.
-    /// Checks reclaim idle keys in small batches. Call [`prune`](Self::prune) for a full pass.
-    /// Existing keys above a newly lowered limit remain until they can be pruned.
+    /// Set the maximum number of stored keys.
     ///
-    /// # Panics
-    ///
+    /// When full, checks for new keys try to remove idle keys before rejecting the request.
+    /// Lowering the limit does not remove existing keys.
     /// Panics if `max_keys` is zero.
     pub fn with_max_keys(mut self, max_keys: usize) -> Self {
         self.state = self.state.with_max_keys(max_keys);
         self
     }
 
-    /// Preallocate for approximately `expected_keys`, without limiting stored keys.
+    /// Reserve storage for approximately `expected_keys` without setting a key limit.
     pub fn with_capacity(mut self, expected_keys: usize) -> Self {
         self.state = self.state.with_capacity(expected_keys);
         self
     }
 
-    /// Remove fully replenished entries, returning the number removed.
-    /// Oversized buckets shrink after removals, while shard chunks remain reusable.
+    /// Remove fully replenished keys and return the number removed.
     pub fn prune(&self) -> usize {
         self.prune_at(self.clock.now())
     }
 
-    /// Remove fully replenished entries using a caller-supplied current time.
+    /// Remove fully replenished keys at the supplied time.
     pub fn prune_at(&self, now: Instant) -> usize {
         self.state.prune_at(now)
     }
 
-    /// Consume allowance for `key`, or return a quota or storage-capacity retry delay.
+    /// Consume one request for `key`, or get a retry delay.
+    ///
+    /// Requests are rejected when their per-key limit is reached or there is no
+    /// room to store a new key.
     /// The key is cloned only when a new entry is inserted.
     #[inline]
     pub fn check(&self, key: &K) -> Result<(), Duration> {
         self.check_at(key, self.clock.now())
     }
 
-    /// Check a key using a caller-supplied current time.
+    /// Consume one request for a key at the supplied time.
     #[inline]
     pub fn check_at(&self, key: &K, now: Instant) -> Result<(), Duration> {
         self.state.check_at::<true>(&self.quota, key, now)
     }
 
-    /// Consume `requests` for a key atomically, or leave its allowance unchanged.
+    /// Consume a batch of `requests` for a key atomically.
+    ///
+    /// Rejected batches do not count toward the limit.
     /// Zero requests succeed without storing a key. Counts above the burst return
     /// [`Rejection::InsufficientCapacity`] before accessing storage.
     #[inline]
@@ -144,7 +151,7 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
         self.check_n_at(key, requests, self.clock.now())
     }
 
-    /// Consume `requests` for a key using a caller-supplied current time.
+    /// Consume a batch of `requests` for a key at the supplied time.
     #[inline]
     pub fn check_n_at(&self, key: &K, requests: u32, now: Instant) -> Result<(), Rejection> {
         if requests == 0 {
@@ -155,27 +162,29 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
             .map_err(Rejection::from)
     }
 
-    /// Check allowance without consuming it or inserting the key.
-    /// May prune idle keys at the key limit. Does not reserve allowance or a key slot.
+    /// Check one request without counting it toward the limit or storing the key.
+    ///
+    /// This may remove idle keys when storage is full, but does not reserve space for the key.
     #[inline]
     pub fn peek(&self, key: &K) -> Result<(), Duration> {
         self.peek_at(key, self.clock.now())
     }
 
-    /// Check a key without consuming allowance, using a caller-supplied current time.
+    /// Check one request at the supplied time without counting it toward the limit.
     #[inline]
     pub fn peek_at(&self, key: &K, now: Instant) -> Result<(), Duration> {
         self.state.check_at::<false>(&self.quota, key, now)
     }
 
-    /// Check whether `requests` fit without consuming allowance or inserting the key.
-    /// May prune idle keys at the key limit. Does not reserve allowance or a key slot.
+    /// Check a batch without counting it toward the limit or storing the key.
+    ///
+    /// This may remove idle keys when storage is full, but does not reserve space for the key.
     #[inline]
     pub fn peek_n(&self, key: &K, requests: u32) -> Result<(), Rejection> {
         self.peek_n_at(key, requests, self.clock.now())
     }
 
-    /// Check a batch for a key without consuming it, using a caller-supplied current time.
+    /// Check a batch at the supplied time without counting it toward the limit.
     #[inline]
     pub fn peek_n_at(&self, key: &K, requests: u32, now: Instant) -> Result<(), Rejection> {
         if requests == 0 {
@@ -187,8 +196,20 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
     }
 
     /// Wait for and consume one request for a key using an async sleep function.
-    /// Waiting reserves neither allowance nor a key slot and guarantees no fairness.
-    /// Dropping the future while sleeping consumes nothing.
+    ///
+    /// Other calls can use available requests while this future sleeps, so waiting
+    /// calls are not guaranteed to complete in order. Dropping the future while
+    /// sleeping does not use any requests.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), bottlecap::Rejection> {
+    /// use bottlecap::{KeyedLimiter, Quota};
+    ///
+    /// let clients = KeyedLimiter::new(Quota::per_second(10));
+    /// clients.wait(&"alice", tokio::time::sleep).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn wait<F, Fut>(&self, key: &K, sleep: F) -> Result<(), Rejection>
     where
         F: FnMut(Duration) -> Fut,
@@ -197,9 +218,11 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
         self.wait_n(key, 1, sleep).await
     }
 
-    /// Wait for and atomically consume `requests` for a key. Impossible batches
-    /// return without sleeping. The sleep function must yield to the runtime and
-    /// should wait at least the supplied duration to avoid busy retrying.
+    /// Wait for and consume a batch of `requests` for a key atomically.
+    ///
+    /// Batches larger than the burst fail without sleeping. The sleep function
+    /// must yield to the runtime and should wait at least the supplied duration
+    /// to avoid a busy loop.
     pub async fn wait_n<F, Fut>(
         &self,
         key: &K,
