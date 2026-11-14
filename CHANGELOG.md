@@ -5,22 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.2.0] - 2026-11-14
 
 ### Added
 
-- `KeyedLimiterLayer::by_header()` and `HeaderLimiterLayer` aliases in the Tower
-  and Actix Web integrations.
-- Borrowed queries for keyed checks, peeks, remaining requests, and reset.
-  `KeyedLimiter<String>` accepts `&str` without creating a `String` unless inserting
-  a new key.
-- `IpLimiterLayer` aliases in the Tower and Actix Web integrations for per-IP layers.
-- Automatic incremental cleanup of fully replenished keys during missing-key checks,
-  enabled by default. Existing-key checks do not trigger cleanup.
-- `KeyedLimiter::with_auto_prune(false)` to disable proactive cleanup while retaining
-  manual pruning and cleanup when the key storage limit is full.
-- `KeyedLimiter::prune_partial()` and `prune_partial_at()` to run one rotating
-  cleanup batch explicitly.
+- Added automatic idle-key cleanup, enabled by default. Opt out with `with_auto_prune(false)`.
+- Added `prune_partial()` and `prune_partial_at()` for manual incremental cleanup.
+- Keyed checks, peeks, remaining requests, and reset now accept `&str` for `String` keys.
+- Added Header-based rate limiting with `by_header()`, `HeaderLimiterLayer` and `IpLimiterLayer` aliases
 
 ## [v0.1.0] - 2026-11-13
 
