@@ -102,7 +102,8 @@ fn reset_restores_allowance_and_frees_capacity() {
         assert!(limiter.reset(&"a"));
     }
     assert!(limiter.check_at(&"b", now).is_ok());
-    assert_eq!(limiter.prune_at(now + Duration::from_nanos(10)), 1);
+    let limiter = limiter.with_clock(|| now + Duration::from_nanos(10));
+    assert_eq!(limiter.prune(), 1);
     assert!(limiter.is_empty());
 }
 
@@ -258,9 +259,12 @@ fn pruning_during_checks_preserves_allowance() {
     let limiter =
         KeyedLimiter::new(Quota::per(Duration::from_nanos(10), 1).with_burst(100)).with_max_keys(1);
     let start = Instant::now();
+    let time = std::sync::atomic::AtomicU64::new(0);
+    let limiter = limiter.with_clock(|| start + Duration::from_nanos(time.load(Relaxed)));
     assert_eq!(limiter.check_n_at(&0, 100, start), Ok(()));
     for wave in 1..=16 {
         let now = start + Duration::from_nanos(wave * 1000);
+        time.store(wave * 1000, Relaxed);
         let barrier = Barrier::new(9);
         let admitted = AtomicUsize::new(0);
         thread::scope(|scope| {
@@ -275,7 +279,7 @@ fn pruning_during_checks_preserves_allowance() {
             }
             barrier.wait();
             for _ in 0..100 {
-                limiter.prune_at(now);
+                limiter.prune();
             }
         });
         assert_eq!(admitted.load(Relaxed), 33);
@@ -295,6 +299,100 @@ fn unused_allowance_does_not_store_keys() {
         let _ = limiter.peek(&0);
         assert!(limiter.is_empty());
     }
+}
+
+#[test]
+fn disabled_auto_pruning_preserves_manual_cleanup() {
+    let start = Instant::now();
+    let clock = Cell::new(start);
+    let limiter = KeyedLimiter::new(Quota::per_second(1))
+        .with_auto_prune(false)
+        .with_clock(|| clock.get());
+    // Cross both the insertion threshold and the time-based cleanup deadline.
+    for key in 0..2048 {
+        clock.set(start + Duration::from_secs(key));
+        assert_eq!(limiter.check(&key), Ok(()));
+    }
+    clock.set(start + Duration::from_secs(2048));
+    assert_eq!(limiter.peek(&2048), Ok(()));
+    assert_eq!(limiter.len(), 2048);
+    assert_eq!(limiter.prune_partial(), 2048);
+    assert!(limiter.is_empty());
+    assert_eq!(limiter.check(&2048), Ok(()));
+    clock.set(start + Duration::from_secs(2049));
+    assert_eq!(limiter.prune(), 1);
+}
+
+#[test]
+fn disabled_auto_pruning_preserves_capacity_cleanup() {
+    for cap_first in [false, true] {
+        let limiter = KeyedLimiter::new(Quota::per_second(1));
+        let limiter = if cap_first {
+            limiter.with_max_keys(3).with_auto_prune(false)
+        } else {
+            limiter.with_auto_prune(false).with_max_keys(3)
+        };
+        let start = Instant::now();
+        for key in 0..2 {
+            assert_eq!(limiter.check_at(&key, start), Ok(()));
+        }
+        let later = start + Duration::from_secs(2);
+        assert_eq!(limiter.peek_at(&2, later), Ok(()));
+        assert_eq!(limiter.len(), 2);
+        assert_eq!(limiter.check_at(&2, later), Ok(()));
+        assert_eq!(limiter.len(), 3);
+        assert_eq!(limiter.check_at(&3, later), Ok(()));
+        assert!(limiter.len() <= 3);
+        assert_eq!(limiter.check_at(&2, later), Err(Duration::from_secs(1)));
+    }
+}
+
+#[test]
+fn missing_key_checks_reclaim_idle_keys() {
+    let start = Instant::now();
+    let clock = Cell::new(start);
+    let limiter = KeyedLimiter::new(Quota::per_second(1).with_burst(2))
+        .with_auto_prune(false)
+        .with_clock(|| clock.get());
+    assert_eq!(limiter.check_n(&0, 2), Ok(()));
+    assert_eq!(limiter.check(&1), Ok(()));
+    clock.set(start + Duration::from_secs(1));
+    // Existing-key checks stay on the fast path, even when cleanup is due.
+    assert_eq!(limiter.check(&0), Ok(()));
+    assert_eq!(limiter.len(), 2);
+    assert_eq!(limiter.peek(&2), Ok(()));
+    assert_eq!(limiter.len(), 2);
+    let limiter = limiter.with_auto_prune(true);
+    assert_eq!(limiter.peek(&2), Ok(()));
+    assert_eq!(limiter.len(), 1);
+    assert_eq!(limiter.remaining(&0), 0);
+    assert_eq!(limiter.check(&0), Err(Duration::from_secs(1)));
+    assert_eq!(limiter.check_at(&1, start), Err(Duration::from_secs(1)));
+    assert_eq!(limiter.check(&2), Ok(()));
+    assert_eq!(limiter.len(), 2);
+}
+
+#[test]
+fn uncapped_churn_releases_keys() {
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    struct Key(u64, Arc<()>);
+
+    let limiter = KeyedLimiter::new(Quota::per(Duration::from_nanos(10), 1));
+    let live = Arc::new(());
+    let start = Instant::now();
+    // All traffic fits within one cleanup interval. Insertion-driven cleanup
+    // must keep up without relying on elapsed wall-clock time or a key cap.
+    for index in 0..100_000 {
+        let now = start + Duration::from_nanos(index);
+        assert_eq!(
+            limiter.check_at(&Key(index, Arc::clone(&live)), now),
+            Ok(())
+        );
+        assert!(limiter.len() < 8192, "cleanup fell behind at key {index}");
+        assert_eq!(Arc::strong_count(&live), limiter.len() + 1);
+    }
+    drop(limiter);
+    assert_eq!(Arc::strong_count(&live), 1);
 }
 
 #[test]

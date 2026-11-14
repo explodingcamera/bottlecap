@@ -11,7 +11,9 @@ const SHARDS: usize = 4096;
 const SHARDS_PER_CHUNK: usize = 64;
 const MAX_VECTOR_KEYS: usize = 4;
 const CLEANUP_KEYS: usize = 4096;
-const MAX_CLEANUP_INTERVAL: u64 = 1_000_000;
+const MAX_CLEANUP_INTERVAL: u64 = Duration::from_millis(1).as_nanos() as u64;
+const AUTO_CLEANUP_INTERVAL: u64 = Duration::from_secs(1).as_nanos() as u64;
+const AUTO_CLEANUP_INSERTIONS: usize = 1024;
 
 type ShardChunk<K> = OnceLock<Box<[Shard<K>]>>;
 
@@ -303,10 +305,13 @@ impl<K: Eq + Hash> Bucket<K> {
 
 struct Capacity {
     max_keys: Option<usize>,
+    auto_prune: bool,
     used: usize,
     cleanup_at: u64,
     prune_cursor: usize,
     reclaimed_at: u64,
+    auto_cleanup_at: u64,
+    insertions_since_cleanup: usize,
 }
 
 impl<K: Eq + Hash, S: BuildHasher> ShardedStore<K, S> {
@@ -322,10 +327,13 @@ impl<K: Eq + Hash, S: BuildHasher> ShardedStore<K, S> {
             hasher,
             insertion: Mutex::new(Capacity {
                 max_keys: None,
+                auto_prune: true,
                 used: 0,
                 cleanup_at: u64::MAX,
                 prune_cursor: 0,
                 reclaimed_at: 0,
+                auto_cleanup_at: u64::MAX,
+                insertions_since_cleanup: 0,
             }),
         }
     }
@@ -371,6 +379,14 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
             if capacity.used >= max {
                 capacity.cleanup_at = now.saturating_add(quota.interval.min(MAX_CLEANUP_INTERVAL));
             }
+        } else if capacity.auto_prune
+            && capacity.max_keys.is_none_or(|max| capacity.used < max)
+            && (now >= capacity.auto_cleanup_at
+                || capacity.insertions_since_cleanup >= AUTO_CLEANUP_INSERTIONS)
+        {
+            // Scan a batch without stopping after the first reclaimed key. The
+            // insertion threshold keeps cleanup progressing even during fast churn.
+            self.prune_locked(&mut capacity, now, Some(0));
         }
         if capacity.max_keys.is_some_and(|max| capacity.used >= max) {
             return Err(Duration::from_nanos(
@@ -397,6 +413,12 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
             &self.hasher,
         );
         capacity.used += 1;
+        if capacity.auto_prune {
+            capacity.insertions_since_cleanup += 1;
+            capacity.auto_cleanup_at = capacity
+                .auto_cleanup_at
+                .min(now.saturating_add(AUTO_CLEANUP_INTERVAL));
+        }
         capacity.cleanup_at = capacity
             .cleanup_at
             .min(now.saturating_add(quota.interval.min(MAX_CLEANUP_INTERVAL)));
@@ -408,7 +430,8 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
     /// checks while deciding which timestamps are safe to discard.
     ///
     /// Automatic cleanup scans a small batch of shards in large maps and stops
-    /// once there is room. Explicit pruning scans every shard. The cursor rotates
+    /// once there is room when `stop_below` is positive. `Some(0)` scans a whole
+    /// batch, while `None` scans every shard. The cursor rotates
     /// so later passes reach the rest of the map. Allocated chunks remain reusable.
     fn prune_locked(&self, capacity: &mut Capacity, now: u64, stop_below: Option<usize>) -> usize {
         if now < capacity.reclaimed_at {
@@ -443,6 +466,8 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
             }
         }
         capacity.cleanup_at = 0;
+        capacity.auto_cleanup_at = now.saturating_add(AUTO_CLEANUP_INTERVAL);
+        capacity.insertions_since_cleanup = 0;
         let removed = before - capacity.used;
         if removed > 0 {
             capacity.reclaimed_at = now;
@@ -488,6 +513,16 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
         let removed = entries.remove(hash, key, &self.hasher);
         capacity.used -= usize::from(removed);
         removed
+    }
+
+    /// Enable proactive cleanup without affecting capacity-triggered or manual pruning.
+    pub(crate) fn with_auto_prune(mut self, enabled: bool) -> Self {
+        let capacity = self.insertion.get_mut().expect("limiter state poisoned");
+        if enabled && !capacity.auto_prune && capacity.used > 0 {
+            capacity.auto_cleanup_at = 0;
+        }
+        capacity.auto_prune = enabled;
+        self
     }
 
     /// Cap stored keys, rejecting unknown keys while storage is full.
@@ -550,6 +585,12 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
     pub(crate) fn prune_at(&self, now: Instant) -> usize {
         let mut capacity = self.insertion.lock().expect("limiter state poisoned");
         self.prune_locked(&mut capacity, now.0, None)
+    }
+
+    /// Reclaim one rotating batch, regardless of the automatic cleanup schedule.
+    pub(crate) fn prune_partial_at(&self, now: Instant) -> usize {
+        let mut capacity = self.insertion.lock().expect("limiter state poisoned");
+        self.prune_locked(&mut capacity, now.0, Some(0))
     }
 
     /// Check requests without taking the insertion mutex for existing keys.
@@ -722,6 +763,31 @@ mod tests {
     }
 
     #[test]
+    fn automatic_cleanup_rotates_in_batches() {
+        let store = ShardedStore::new(BuildHasherDefault::<ShardHasher>::default());
+        let quota = Quota::per_second(1).with_burst(2).0;
+        let start = Instant(0);
+        for key in 0u64..8192 {
+            assert_eq!(store.check_at::<true>(&quota, &key, start), Ok(()));
+        }
+        let cursor = store.insertion.lock().unwrap().prune_cursor;
+        let later = start + Duration::from_secs(1);
+        // Keep one key in the next batch active while all other keys refill.
+        let active = cursor as u64;
+        assert_eq!(store.check_at::<true>(&quota, &active, later), Ok(()));
+        assert_eq!(store.check_at::<true>(&quota, &8192, later), Ok(()));
+        assert_eq!(store.len(), 4098);
+        assert_eq!(store.remaining_at(&quota, &active, later), 1);
+        assert_eq!(
+            store.insertion.lock().unwrap().prune_cursor,
+            (cursor + SHARDS / 2) % SHARDS
+        );
+        // Manual partial cleanup shares the cursor and reaches later shards.
+        assert!(store.prune_partial_at(later + Duration::from_secs(1)) >= 4096);
+        assert!(store.len() <= 2);
+    }
+
+    #[test]
     fn capacity_cleanup_stops_when_room_is_available() {
         let limiter = KeyedLimiter::with_hasher(
             Quota::per(Duration::from_nanos(10), 1),
@@ -865,21 +931,30 @@ mod tests {
             }
         }
 
-        for cleanup in ["prune", "reset", "admission"] {
+        for cleanup in ["prune", "reset", "admission", "automatic"] {
             let live = Arc::new(());
             let key = |id| Key(id, Arc::clone(&live));
-            let store =
-                ShardedStore::new(BuildHasherDefault::<ShardHasher>::default()).with_max_keys(1024);
-            let quota = Quota::per(Duration::from_nanos(10), 1).0;
+            let store = ShardedStore::new(BuildHasherDefault::<ShardHasher>::default());
+            let store = if cleanup == "automatic" {
+                store
+            } else {
+                store.with_max_keys(1024)
+            };
+            let interval = if cleanup == "automatic" {
+                AUTO_CLEANUP_INTERVAL
+            } else {
+                10
+            };
+            let quota = Quota::per(Duration::from_nanos(interval), 1).0;
             for wave in 0..8 {
-                let now = Instant(wave * 20);
+                let now = Instant(wave * interval * 2);
                 for id in 0..1024 {
                     assert_eq!(store.check_at::<true>(&quota, &key(id), now), Ok(()));
                 }
                 assert_eq!(store.len(), 1024);
                 assert_eq!(Arc::strong_count(&live), 1025);
 
-                let later = now + Duration::from_nanos(10);
+                let later = now + Duration::from_nanos(interval);
                 for id in 0..3 {
                     assert_eq!(store.check_at::<true>(&quota, &key(id), later), Ok(()));
                 }
@@ -901,7 +976,7 @@ mod tests {
                 for id in 0..3 {
                     assert_eq!(
                         store.check_at::<true>(&quota, &key(id), later),
-                        Err(Duration::from_nanos(10))
+                        Err(Duration::from_nanos(interval))
                     );
                 }
                 let bucket = store.shards[0].get().unwrap()[0].0.read().unwrap();
@@ -910,7 +985,7 @@ mod tests {
                 };
                 assert!(entries.num_buckets() < 32, "retained peak table allocation");
             }
-            assert_eq!(store.prune_at(Instant(160)), 3);
+            assert_eq!(store.prune_at(Instant(interval * 16)), 3);
             assert_eq!(Arc::strong_count(&live), 1);
             assert!(matches!(
                 &*store.shards[0].get().unwrap()[0].0.read().unwrap(),

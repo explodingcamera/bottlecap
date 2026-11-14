@@ -7,8 +7,10 @@ use crate::{Clock, DefaultClock, DefaultHashBuilder, Gcra, Instant, Quota, Rejec
 
 /// A rate limiter that tracks a separate limit for each key.
 ///
-/// Call [`Self::prune`] periodically to remove idle keys. With a key limit,
-/// new requests also reclaim idle keys when storage is full.
+/// By default, checks for missing keys reclaim fully replenished keys in rotating
+/// batches. Existing-key checks do not trigger cleanup, and no background task runs.
+/// Use [`Self::with_auto_prune`] to disable proactive cleanup or [`Self::prune`]
+/// for a full cleanup.
 pub struct KeyedLimiter<K, S = DefaultHashBuilder, C = DefaultClock> {
     quota: Gcra,
     state: ShardedStore<K, S>,
@@ -109,6 +111,16 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
         self
     }
 
+    /// Enable or disable proactive cleanup during missing-key checks. Enabled by default.
+    ///
+    /// Disabling this leaves manual pruning and cleanup at the
+    /// [`with_max_keys`](Self::with_max_keys) storage limit enabled.
+    /// Without a key limit, disabled cleanup retains keys until explicitly removed.
+    pub fn with_auto_prune(mut self, enabled: bool) -> Self {
+        self.state = self.state.with_auto_prune(enabled);
+        self
+    }
+
     /// Reserve storage for approximately `expected_keys` without setting a key limit.
     pub fn with_capacity(mut self, expected_keys: usize) -> Self {
         self.state = self.state.with_capacity(expected_keys);
@@ -123,6 +135,19 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
     /// Remove fully replenished keys at the supplied time.
     pub fn prune_at(&self, now: Instant) -> usize {
         self.state.prune_at(now)
+    }
+
+    /// Remove fully replenished keys in one rotating batch and return the number removed.
+    ///
+    /// Uses the same batch sizing and cursor as automatic cleanup. Small stores
+    /// may fit in one batch. Call [`prune`](Self::prune) for a full cleanup.
+    pub fn prune_partial(&self) -> usize {
+        self.prune_partial_at(self.clock.now())
+    }
+
+    /// Remove fully replenished keys in one rotating batch at the supplied time.
+    pub fn prune_partial_at(&self, now: Instant) -> usize {
+        self.state.prune_partial_at(now)
     }
 
     /// Consume one request for `key`, or get a retry delay.
@@ -164,7 +189,7 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
 
     /// Check one request without counting it toward the limit or storing the key.
     ///
-    /// This may remove idle keys when storage is full, but does not reserve space for the key.
+    /// This may remove idle keys in a batch, but does not reserve space for the key.
     #[inline]
     pub fn peek(&self, key: &K) -> Result<(), Duration> {
         self.peek_at(key, self.clock.now())
@@ -178,7 +203,7 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
 
     /// Check a batch without counting it toward the limit or storing the key.
     ///
-    /// This may remove idle keys when storage is full, but does not reserve space for the key.
+    /// This may remove idle keys in a batch, but does not reserve space for the key.
     #[inline]
     pub fn peek_n(&self, key: &K, requests: u32) -> Result<(), Rejection> {
         self.peek_n_at(key, requests, self.clock.now())
