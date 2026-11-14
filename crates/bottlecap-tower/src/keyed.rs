@@ -46,6 +46,11 @@ pub struct KeyedLimiterLayer<K, H = DefaultHashBuilder, C = DefaultClock, E = Ex
     grpc: bool,
 }
 
+/// A per-IP rate-limit layer.
+/// Create it with [`KeyedLimiterLayer::by_ip`].
+pub type IpLimiterLayer<H = DefaultHashBuilder, C = DefaultClock> =
+    KeyedLimiterLayer<IpAddr, H, C, IpKey>;
+
 /// Reads a typed key from request extensions.
 #[derive(Clone)]
 #[doc(hidden)]

@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Mutex, OnceLock, RwLock};
@@ -98,7 +99,10 @@ impl<K: Eq> SmallBucket<K> {
     }
 
     #[inline]
-    fn get(&self, hash: u64, key: &K) -> Option<&AtomicU64> {
+    fn get<Q: Eq + ?Sized>(&self, hash: u64, key: &Q) -> Option<&AtomicU64>
+    where
+        K: Borrow<Q>,
+    {
         let fingerprint = (hash >> 57) as u32 | 0x80;
         let difference = u32::from_le_bytes(self.fingerprints) ^ (fingerprint * 0x0101_0101);
         // One high bit per matching byte. Subtraction may also mark a later byte
@@ -107,7 +111,7 @@ impl<K: Eq> SmallBucket<K> {
         while matches != 0 {
             let index = matches.trailing_zeros() as usize / 8;
             let entry = &self.entries[index];
-            if entry.0 == *key {
+            if entry.0.borrow() == key {
                 return Some(&entry.1);
             }
             std::hint::cold_path();
@@ -119,12 +123,17 @@ impl<K: Eq> SmallBucket<K> {
 
 impl<K: Eq + Hash> Bucket<K> {
     #[inline]
-    fn get(&self, hash: u64, key: &K) -> Option<&AtomicU64> {
+    fn get<Q: Eq + ?Sized>(&self, hash: u64, key: &Q) -> Option<&AtomicU64>
+    where
+        K: Borrow<Q>,
+    {
         match self {
-            Self::One(entry) => (entry.hash == hash && entry.key == *key).then_some(&entry.arrival),
+            Self::One(entry) => {
+                (entry.hash == hash && entry.key.borrow() == key).then_some(&entry.arrival)
+            }
             Self::Small(bucket) => bucket.get(hash, key),
             Self::Dense(entries) => entries
-                .find(hash, |(stored, _)| stored == key)
+                .find(hash, |(stored, _)| stored.borrow() == key)
                 .map(|(_, arrival)| arrival),
         }
     }
@@ -232,30 +241,38 @@ impl<K: Eq + Hash> Bucket<K> {
         removed
     }
 
-    fn remove<S: BuildHasher>(&mut self, hash: u64, key: &K, hasher: &S) -> bool {
+    fn remove<Q: Eq + ?Sized, S: BuildHasher>(&mut self, hash: u64, key: &Q, hasher: &S) -> bool
+    where
+        K: Borrow<Q>,
+    {
         let removed = match self {
             Self::One(entry) => {
-                if entry.hash != hash || entry.key != *key {
+                if entry.hash != hash || entry.key.borrow() != key {
                     return false;
                 }
                 *self = Self::default();
                 true
             }
             Self::Small(bucket) => {
-                let Some(index) = bucket.entries.iter().position(|(stored, _)| stored == key)
+                let Some(index) = bucket
+                    .entries
+                    .iter()
+                    .position(|(stored, _)| stored.borrow() == key)
                 else {
                     return false;
                 };
                 bucket.remove(index);
                 true
             }
-            Self::Dense(entries) => match entries.find_entry(hash, |(stored, _)| stored == key) {
-                Ok(entry) => {
-                    entry.remove();
-                    true
+            Self::Dense(entries) => {
+                match entries.find_entry(hash, |(stored, _)| stored.borrow() == key) {
+                    Ok(entry) => {
+                        entry.remove();
+                        true
+                    }
+                    Err(_) => false,
                 }
-                Err(_) => false,
-            },
+            }
         };
         if removed {
             self.compact(hasher);
@@ -346,21 +363,24 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
     /// regain requests before its original refill time.
     #[cold]
     #[inline(never)]
-    fn check_missing<const CONSUME: bool>(
+    fn check_missing<const CONSUME: bool, Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(
         &self,
         quota: &Gcra,
-        key: &K,
+        key: &Q,
         now: u64,
         hash: u64,
         index: usize,
-    ) -> Result<(), Duration> {
+    ) -> Result<(), Duration>
+    where
+        K: Borrow<Q>,
+    {
         let mut capacity = self.insertion.lock().expect("limiter state poisoned");
         if let Some(chunk) = self.shards[index / SHARDS_PER_CHUNK].get() {
             let entries = chunk[index % SHARDS_PER_CHUNK]
                 .0
                 .read()
                 .expect("limiter state poisoned");
-            if let Some(arrival) = entries.get(hash, key) {
+            if let Some(arrival) = entries.get::<Q>(hash, key) {
                 return if CONSUME {
                     quota.check_atomic(now, arrival)
                 } else {
@@ -407,7 +427,7 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
         shard.0.write().expect("limiter state poisoned").insert(
             Entry {
                 hash,
-                key: key.clone(),
+                key: key.to_owned(),
                 arrival: AtomicU64::new(next),
             },
             &self.hasher,
@@ -481,7 +501,15 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
     }
 
     /// Read a key's remaining requests without inserting it or reclaiming other keys.
-    pub(crate) fn remaining_at(&self, quota: &Gcra, key: &K, now: Instant) -> u32 {
+    pub(crate) fn remaining_at<Q: Eq + Hash + ?Sized>(
+        &self,
+        quota: &Gcra,
+        key: &Q,
+        now: Instant,
+    ) -> u32
+    where
+        K: Borrow<Q>,
+    {
         let hash = self.hasher.hash_one(key);
         let index = (hash >> 32) as usize & (self.shards.len() * SHARDS_PER_CHUNK - 1);
         if let Some(chunk) = self.shards[index / SHARDS_PER_CHUNK].get() {
@@ -499,7 +527,10 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
     /// Remove a key's rate-limit state, returning whether it was stored.
     /// Unlike pruning, this deliberately resets the rate limit. Updating
     /// the key count under the insertion mutex makes the freed slot reusable.
-    pub(crate) fn reset(&self, key: &K) -> bool {
+    pub(crate) fn reset<Q: Eq + Hash + ?Sized>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+    {
         let hash = self.hasher.hash_one(key);
         let index = (hash >> 32) as usize & (self.shards.len() * SHARDS_PER_CHUNK - 1);
         let mut capacity = self.insertion.lock().expect("limiter state poisoned");
@@ -597,12 +628,15 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
     /// A shard read lock protects timestamps during atomic request-budget updates.
     /// Release that lock before entering the missing-key path to preserve lock order.
     #[inline]
-    pub(crate) fn check_at<const CONSUME: bool>(
+    pub(crate) fn check_at<const CONSUME: bool, Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(
         &self,
         quota: &Gcra,
-        key: &K,
+        key: &Q,
         now: Instant,
-    ) -> Result<(), Duration> {
+    ) -> Result<(), Duration>
+    where
+        K: Borrow<Q>,
+    {
         let hash = self.hasher.hash_one(key);
         // Dense maps use low bits for indexing and high bits for fingerprints.
         // Select shards from the middle so sharing a builder does not force
@@ -612,7 +646,7 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
             if let Some(chunk) = self.shards[index / SHARDS_PER_CHUNK].get() {
                 let shard = &chunk[index % SHARDS_PER_CHUNK];
                 let entries = shard.0.read().expect("limiter state poisoned");
-                if let Some(arrival) = entries.get(hash, key) {
+                if let Some(arrival) = entries.get::<Q>(hash, key) {
                     return if CONSUME {
                         quota.check_atomic(now.0, arrival)
                     } else {
@@ -621,7 +655,7 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone> ShardedStore<K, S> {
                 }
             }
         }
-        self.check_missing::<CONSUME>(quota, key, now.0, hash, index)
+        self.check_missing::<CONSUME, Q>(quota, key, now.0, hash, index)
     }
 }
 
@@ -649,6 +683,34 @@ mod tests {
 
         fn finish(&self) -> u64 {
             self.0
+        }
+    }
+
+    #[test]
+    fn borrowed_queries_cover_bucket_representations() {
+        let hasher = BuildHasherDefault::<ShardHasher>::default();
+        for count in [1, 4, 8] {
+            let mut bucket = Bucket::default();
+            for key in 0..count {
+                let stored = key.to_string();
+                bucket.insert(
+                    Entry {
+                        hash: hasher.hash_one(&stored),
+                        key: stored,
+                        arrival: AtomicU64::new(key),
+                    },
+                    &hasher,
+                );
+            }
+            for key in 0..count {
+                let query = key.to_string();
+                let hash = hasher.hash_one(query.as_str());
+                assert_eq!(bucket.get(hash, query.as_str()).unwrap().load(Relaxed), key);
+            }
+            assert!(bucket.get(hasher.hash_one("missing"), "missing").is_none());
+            let hash = hasher.hash_one("0");
+            assert!(bucket.remove(hash, "0", &hasher));
+            assert!(bucket.get(hash, "0").is_none());
         }
     }
 
@@ -768,14 +830,14 @@ mod tests {
         let quota = Quota::per_second(1).with_burst(2).0;
         let start = Instant(0);
         for key in 0u64..8192 {
-            assert_eq!(store.check_at::<true>(&quota, &key, start), Ok(()));
+            assert_eq!(store.check_at::<true, _>(&quota, &key, start), Ok(()));
         }
         let cursor = store.insertion.lock().unwrap().prune_cursor;
         let later = start + Duration::from_secs(1);
         // Keep one key in the next batch active while all other keys refill.
         let active = cursor as u64;
-        assert_eq!(store.check_at::<true>(&quota, &active, later), Ok(()));
-        assert_eq!(store.check_at::<true>(&quota, &8192, later), Ok(()));
+        assert_eq!(store.check_at::<true, _>(&quota, &active, later), Ok(()));
+        assert_eq!(store.check_at::<true, _>(&quota, &8192, later), Ok(()));
         assert_eq!(store.len(), 4098);
         assert_eq!(store.remaining_at(&quota, &active, later), 1);
         assert_eq!(
@@ -949,14 +1011,14 @@ mod tests {
             for wave in 0..8 {
                 let now = Instant(wave * interval * 2);
                 for id in 0..1024 {
-                    assert_eq!(store.check_at::<true>(&quota, &key(id), now), Ok(()));
+                    assert_eq!(store.check_at::<true, _>(&quota, &key(id), now), Ok(()));
                 }
                 assert_eq!(store.len(), 1024);
                 assert_eq!(Arc::strong_count(&live), 1025);
 
                 let later = now + Duration::from_nanos(interval);
                 for id in 0..3 {
-                    assert_eq!(store.check_at::<true>(&quota, &key(id), later), Ok(()));
+                    assert_eq!(store.check_at::<true, _>(&quota, &key(id), later), Ok(()));
                 }
                 match cleanup {
                     "prune" => assert_eq!(store.prune_at(later), 1021),
@@ -966,7 +1028,7 @@ mod tests {
                         }
                     }
                     _ => {
-                        assert_eq!(store.check_at::<true>(&quota, &key(1024), later), Ok(()));
+                        assert_eq!(store.check_at::<true, _>(&quota, &key(1024), later), Ok(()));
                         assert_eq!(store.len(), 4);
                         assert!(store.reset(&key(1024)));
                     }
@@ -975,7 +1037,7 @@ mod tests {
                 assert_eq!(Arc::strong_count(&live), 4);
                 for id in 0..3 {
                     assert_eq!(
-                        store.check_at::<true>(&quota, &key(id), later),
+                        store.check_at::<true, _>(&quota, &key(id), later),
                         Err(Duration::from_nanos(interval))
                     );
                 }

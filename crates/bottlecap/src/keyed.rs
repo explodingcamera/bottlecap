@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::future::Future;
 use std::hash::{BuildHasher, Hash};
 use std::time::Duration;
@@ -57,13 +58,23 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
     }
 
     /// The number of requests available for a key, without storing it.
-    pub fn remaining(&self, key: &K) -> u32 {
+    pub fn remaining<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(&self, key: &Q) -> u32
+    where
+        K: Borrow<Q>,
+    {
         self.remaining_at(key, self.clock.now())
     }
 
     /// A key's available requests at a caller-supplied time.
-    pub fn remaining_at(&self, key: &K, now: Instant) -> u32 {
-        self.state.remaining_at(&self.quota, key, now)
+    pub fn remaining_at<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(
+        &self,
+        key: &Q,
+        now: Instant,
+    ) -> u32
+    where
+        K: Borrow<Q>,
+    {
+        self.state.remaining_at::<Q>(&self.quota, key, now)
     }
 
     /// Switch to a custom clock without resetting limits or removing keys.
@@ -97,8 +108,11 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
     /// assert!(clients.reset(&"alice"));
     /// assert!(clients.check(&"alice").is_ok());
     /// ```
-    pub fn reset(&self, key: &K) -> bool {
-        self.state.reset(key)
+    pub fn reset<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+    {
+        self.state.reset::<Q>(key)
     }
 
     /// Set the maximum number of stored keys.
@@ -154,16 +168,26 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
     ///
     /// Requests are rejected when their per-key limit is reached or there is no
     /// room to store a new key.
-    /// The key is cloned only when a new entry is inserted.
+    /// An owned key is created only when a new entry is inserted.
     #[inline]
-    pub fn check(&self, key: &K) -> Result<(), Duration> {
+    pub fn check<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(&self, key: &Q) -> Result<(), Duration>
+    where
+        K: Borrow<Q>,
+    {
         self.check_at(key, self.clock.now())
     }
 
     /// Consume one request for a key at the supplied time.
     #[inline]
-    pub fn check_at(&self, key: &K, now: Instant) -> Result<(), Duration> {
-        self.state.check_at::<true>(&self.quota, key, now)
+    pub fn check_at<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(
+        &self,
+        key: &Q,
+        now: Instant,
+    ) -> Result<(), Duration>
+    where
+        K: Borrow<Q>,
+    {
+        self.state.check_at::<true, Q>(&self.quota, key, now)
     }
 
     /// Consume a batch of `requests` for a key atomically.
@@ -172,18 +196,33 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
     /// Zero requests succeed without storing a key. Counts above the burst return
     /// [`Rejection::InsufficientCapacity`] before accessing storage.
     #[inline]
-    pub fn check_n(&self, key: &K, requests: u32) -> Result<(), Rejection> {
+    pub fn check_n<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(
+        &self,
+        key: &Q,
+        requests: u32,
+    ) -> Result<(), Rejection>
+    where
+        K: Borrow<Q>,
+    {
         self.check_n_at(key, requests, self.clock.now())
     }
 
     /// Consume a batch of `requests` for a key at the supplied time.
     #[inline]
-    pub fn check_n_at(&self, key: &K, requests: u32, now: Instant) -> Result<(), Rejection> {
+    pub fn check_n_at<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(
+        &self,
+        key: &Q,
+        requests: u32,
+        now: Instant,
+    ) -> Result<(), Rejection>
+    where
+        K: Borrow<Q>,
+    {
         if requests == 0 {
             return Ok(());
         }
         self.state
-            .check_at::<true>(&self.quota.batch(requests)?, key, now)
+            .check_at::<true, Q>(&self.quota.batch(requests)?, key, now)
             .map_err(Rejection::from)
     }
 
@@ -191,32 +230,57 @@ impl<K: Eq + Hash + Clone, S: BuildHasher + Clone, C: Clock> KeyedLimiter<K, S, 
     ///
     /// This may remove idle keys in a batch, but does not reserve space for the key.
     #[inline]
-    pub fn peek(&self, key: &K) -> Result<(), Duration> {
+    pub fn peek<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(&self, key: &Q) -> Result<(), Duration>
+    where
+        K: Borrow<Q>,
+    {
         self.peek_at(key, self.clock.now())
     }
 
     /// Check one request at the supplied time without counting it toward the limit.
     #[inline]
-    pub fn peek_at(&self, key: &K, now: Instant) -> Result<(), Duration> {
-        self.state.check_at::<false>(&self.quota, key, now)
+    pub fn peek_at<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(
+        &self,
+        key: &Q,
+        now: Instant,
+    ) -> Result<(), Duration>
+    where
+        K: Borrow<Q>,
+    {
+        self.state.check_at::<false, Q>(&self.quota, key, now)
     }
 
     /// Check a batch without counting it toward the limit or storing the key.
     ///
     /// This may remove idle keys in a batch, but does not reserve space for the key.
     #[inline]
-    pub fn peek_n(&self, key: &K, requests: u32) -> Result<(), Rejection> {
+    pub fn peek_n<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(
+        &self,
+        key: &Q,
+        requests: u32,
+    ) -> Result<(), Rejection>
+    where
+        K: Borrow<Q>,
+    {
         self.peek_n_at(key, requests, self.clock.now())
     }
 
     /// Check a batch at the supplied time without counting it toward the limit.
     #[inline]
-    pub fn peek_n_at(&self, key: &K, requests: u32, now: Instant) -> Result<(), Rejection> {
+    pub fn peek_n_at<Q: Eq + Hash + ToOwned<Owned = K> + ?Sized>(
+        &self,
+        key: &Q,
+        requests: u32,
+        now: Instant,
+    ) -> Result<(), Rejection>
+    where
+        K: Borrow<Q>,
+    {
         if requests == 0 {
             return Ok(());
         }
         self.state
-            .check_at::<false>(&self.quota.batch(requests)?, key, now)
+            .check_at::<false, Q>(&self.quota.batch(requests)?, key, now)
             .map_err(Rejection::from)
     }
 

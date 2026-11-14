@@ -9,7 +9,7 @@ use actix_web::{
 };
 use bottlecap::{Clock, Instant, KeyedLimiter, Limiter, Quota};
 
-use bottlecap_actix_web::{KeyedLimiterLayer, LimiterLayer};
+use bottlecap_actix_web::{IpLimiterLayer, KeyedLimiterLayer, LimiterLayer};
 
 #[test]
 fn shared_allowance_spans_workers_without_peers() {
@@ -147,7 +147,7 @@ fn rejects_without_calling_handler() {
 #[test]
 fn peer_limits_share_allowance_across_workers() {
     actix_web::rt::System::new().block_on(async {
-        let middleware =
+        let middleware: IpLimiterLayer =
             KeyedLimiterLayer::by_ip(KeyedLimiter::new(Quota::per_hour(1))).with_ipv6_prefix(65);
         let first = test::init_service(
             App::new()

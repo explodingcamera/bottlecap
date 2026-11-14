@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Borrowed queries for keyed checks, peeks, remaining requests, and reset.
+  `KeyedLimiter<String>` accepts `&str` without creating a `String` unless inserting
+  a new key.
+- `IpLimiterLayer` aliases in the Tower and Actix Web integrations for per-IP layers.
 - Automatic incremental cleanup of fully replenished keys during missing-key checks,
   enabled by default. Existing-key checks do not trigger cleanup.
 - `KeyedLimiter::with_auto_prune(false)` to disable proactive cleanup while retaining

@@ -27,6 +27,30 @@ fn checks_and_peeks_respect_key_capacity() {
 }
 
 #[test]
+fn borrowed_strings_share_owned_key_state() {
+    let now = Instant::now();
+    let limiter = KeyedLimiter::<String>::new(Quota::per_second(1).with_burst(3))
+        .with_max_keys(1)
+        .with_clock(|| now);
+    assert_eq!(limiter.peek_n("alice", 3), Ok(()));
+    assert_eq!(limiter.check_n("alice", 0), Ok(()));
+    assert!(limiter.is_empty());
+    let owned = String::from("alice");
+    assert_eq!(limiter.check_n(&owned, 2), Ok(()));
+    drop(owned);
+    assert_eq!(limiter.remaining("alice"), 1);
+    assert_eq!(limiter.check("alice"), Ok(()));
+    assert_eq!(limiter.check_at("alice", now), Err(Duration::from_secs(1)));
+    assert_eq!(limiter.check_n("bob", 4), Err(InsufficientCapacity));
+    assert!(limiter.check("bob").is_err());
+    assert_eq!(limiter.len(), 1);
+    assert!(limiter.reset("alice"));
+    assert_eq!(limiter.check_n_at("bob", 3, now), Ok(()));
+    assert_eq!(limiter.remaining_at("bob", now), 0);
+    assert_eq!(limiter.peek_at("bob", now), Err(Duration::from_secs(1)));
+}
+
+#[test]
 fn waits_recheck_after_sleep() {
     let limiter = KeyedLimiter::new(Quota::per_hour(1).with_burst(2));
     assert_eq!(limiter.check_n(&0, 2), Ok(()));
