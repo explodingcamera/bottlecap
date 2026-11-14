@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `KeyedLimiterLayer::by_header()` and `HeaderLimiterLayer` aliases in the Tower
+  and Actix Web integrations.
 - Borrowed queries for keyed checks, peeks, remaining requests, and reset.
   `KeyedLimiter<String>` accepts `&str` without creating a `String` unless inserting
   a new key.

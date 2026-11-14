@@ -1,10 +1,11 @@
+use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use bottlecap::{Clock, DefaultClock, DefaultHashBuilder};
-use http::{Extensions, HeaderMap, Request};
+use http::{Extensions, HeaderMap, HeaderName, Request};
 use tower::Layer;
 
 use crate::{Denied, KeyedLimiter, LimiterService, Policy};
@@ -13,7 +14,7 @@ type IpExtractor = Arc<dyn Fn(&HeaderMap, Option<IpAddr>) -> Option<IpAddr> + Se
 
 /// A per-key rate-limit layer for Tower services.
 ///
-/// Keys come from request extensions unless the layer is created with [`Self::by_ip`].
+/// Keys come from request extensions unless created with [`Self::by_ip`] or [`Self::by_header`].
 ///
 /// ```
 /// use bottlecap_tower::{KeyedLimiter, KeyedLimiterLayer, Quota};
@@ -51,10 +52,20 @@ pub struct KeyedLimiterLayer<K, H = DefaultHashBuilder, C = DefaultClock, E = Ex
 pub type IpLimiterLayer<H = DefaultHashBuilder, C = DefaultClock> =
     KeyedLimiterLayer<IpAddr, H, C, IpKey>;
 
+/// A per-header-value rate-limit layer.
+/// Create it with [`KeyedLimiterLayer::by_header`].
+pub type HeaderLimiterLayer<H = DefaultHashBuilder, C = DefaultClock> =
+    KeyedLimiterLayer<String, H, C, HeaderKey>;
+
 /// Reads a typed key from request extensions.
 #[derive(Clone)]
 #[doc(hidden)]
 pub struct ExtensionKey<K>(PhantomData<fn() -> K>);
+
+/// Reads a borrowed string key from a request header.
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct HeaderKey(HeaderName);
 
 /// Extracts peer addresses and groups IPv6 clients by prefix.
 #[derive(Clone)]
@@ -100,6 +111,26 @@ where
         Self {
             limiter: limiter.into(),
             extractor: ExtensionKey(PhantomData),
+            rate_limit_headers: false,
+            #[cfg(feature = "tonic")]
+            grpc: false,
+        }
+    }
+}
+
+impl<H: BuildHasher + Clone, C: Clock> KeyedLimiterLayer<String, H, C, HeaderKey> {
+    /// Create a layer that limits requests by a header's string value.
+    ///
+    /// Missing, repeated, empty, or invalid values receive HTTP 500 without consuming allowance,
+    /// or gRPC `INTERNAL` with `with_tonic()`.
+    /// Use a trusted or authenticated header, otherwise clients can choose their own keys.
+    pub fn by_header(
+        limiter: impl Into<Arc<KeyedLimiter<String, H, C>>>,
+        header: HeaderName,
+    ) -> Self {
+        Self {
+            limiter: limiter.into(),
+            extractor: HeaderKey(header),
             rate_limit_headers: false,
             #[cfg(feature = "tonic")]
             grpc: false,
@@ -190,23 +221,48 @@ impl<K, H, C, E> KeyedLimiterLayer<K, H, C, E> {
 }
 
 trait ExtractKey<K> {
-    fn extract<B>(&self, request: &Request<B>) -> Option<K>;
+    type Query: Eq + Hash + ToOwned<Owned = K> + ?Sized;
+
+    fn with_key<B, R>(
+        &self,
+        request: &Request<B>,
+        check: impl FnOnce(&Self::Query) -> R,
+    ) -> Option<R>;
 }
 
-impl<K: Clone + Send + Sync + 'static> ExtractKey<K> for ExtensionKey<K> {
-    fn extract<B>(&self, request: &Request<B>) -> Option<K> {
-        request.extensions().get::<K>().cloned()
+impl<K: Eq + Hash + Clone + Send + Sync + 'static> ExtractKey<K> for ExtensionKey<K> {
+    type Query = K;
+
+    fn with_key<B, R>(&self, request: &Request<B>, check: impl FnOnce(&K) -> R) -> Option<R> {
+        request.extensions().get::<K>().map(check)
     }
 }
 
-impl<K, F: Fn(&HeaderMap, &Extensions) -> Option<K>> ExtractKey<K> for F {
-    fn extract<B>(&self, request: &Request<B>) -> Option<K> {
-        self(request.headers(), request.extensions())
+impl<K: Eq + Hash + Clone, F: Fn(&HeaderMap, &Extensions) -> Option<K>> ExtractKey<K> for F {
+    type Query = K;
+
+    fn with_key<B, R>(&self, request: &Request<B>, check: impl FnOnce(&K) -> R) -> Option<R> {
+        self(request.headers(), request.extensions()).map(|key| check(&key))
+    }
+}
+
+impl ExtractKey<String> for HeaderKey {
+    type Query = str;
+
+    fn with_key<B, R>(&self, request: &Request<B>, check: impl FnOnce(&str) -> R) -> Option<R> {
+        let mut values = request.headers().get_all(&self.0).iter();
+        let key = values.next()?.to_str().ok()?;
+        if key.is_empty() || values.next().is_some() {
+            return None;
+        }
+        Some(check(key))
     }
 }
 
 impl ExtractKey<IpAddr> for IpKey {
-    fn extract<B>(&self, request: &Request<B>) -> Option<IpAddr> {
+    type Query = IpAddr;
+
+    fn with_key<B, R>(&self, request: &Request<B>, check: impl FnOnce(&IpAddr) -> R) -> Option<R> {
         let extensions = request.extensions();
         let peer = extensions.get::<SocketAddr>().map(|peer| peer.ip());
         #[cfg(feature = "axum")]
@@ -232,7 +288,7 @@ impl ExtractKey<IpAddr> for IpKey {
             Some(extract) => extract(request.headers(), peer),
             None => peer,
         }?;
-        Some(match ip.to_canonical() {
+        let key = match ip.to_canonical() {
             IpAddr::V4(ip) => IpAddr::V4(ip),
             IpAddr::V6(ip) => {
                 let mask = u128::MAX
@@ -240,7 +296,8 @@ impl ExtractKey<IpAddr> for IpKey {
                     .unwrap_or(0);
                 IpAddr::V6((u128::from(ip) & mask).into())
             }
-        })
+        };
+        Some(check(&key))
     }
 }
 
@@ -260,29 +317,59 @@ where
 
 impl<K, H, C, E> Policy for KeyedLimiterLayer<K, H, C, E>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Hash + Clone + Borrow<E::Query>,
     H: BuildHasher + Clone,
     C: Clock,
     E: ExtractKey<K>,
 {
     fn check<B>(&self, request: &Request<B>) -> Result<Option<(u32, u32)>, Denied> {
-        let key = self.extractor.extract(request).ok_or(Denied::MissingKey)?;
-        let result = self.limiter.check(&key);
-        let limits = self.rate_limit_headers.then(|| {
-            let remaining = if result.is_ok() {
-                self.limiter.remaining(&key)
-            } else {
-                0
-            };
-            (self.limiter.quota().burst(), remaining)
-        });
-        result
-            .map(|()| limits)
-            .map_err(|delay| Denied::Limited(delay, limits))
+        self.extractor
+            .with_key(request, |key| {
+                let result = self.limiter.check(key);
+                let limits = self.rate_limit_headers.then(|| {
+                    let remaining = if result.is_ok() {
+                        self.limiter.remaining(key)
+                    } else {
+                        0
+                    };
+                    (self.limiter.quota().burst(), remaining)
+                });
+                result
+                    .map(|()| limits)
+                    .map_err(|delay| Denied::Limited(delay, limits))
+            })
+            .ok_or(Denied::MissingKey)?
     }
 
     #[cfg(feature = "tonic")]
     fn is_grpc(&self) -> bool {
         self.grpc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Quota;
+
+    #[test]
+    fn header_values_are_validated() {
+        let layer: HeaderLimiterLayer = KeyedLimiterLayer::by_header(
+            KeyedLimiter::new(Quota::per_hour(1)),
+            HeaderName::from_static("x-user-id"),
+        );
+        let mut request = Request::new(());
+        assert!(matches!(layer.check(&request), Err(Denied::MissingKey)));
+        for (value, valid) in [(b"".as_slice(), false), (b"\xff", false), (b"alice", true)] {
+            request
+                .headers_mut()
+                .insert("x-user-id", http::HeaderValue::from_bytes(value).unwrap());
+            assert_eq!(layer.check(&request).is_ok(), valid);
+            assert_eq!(layer.limiter().len(), usize::from(valid));
+        }
+        request
+            .headers_mut()
+            .append("x-user-id", http::HeaderValue::from_static("bob"));
+        assert!(matches!(layer.check(&request), Err(Denied::MissingKey)));
     }
 }

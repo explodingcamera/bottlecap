@@ -73,7 +73,9 @@ pub use bottlecap::{KeyedLimiter, Limiter, Quota};
 mod keyed;
 mod shared;
 
-pub use keyed::{ExtensionKey, IpKey, IpLimiterLayer, KeyedLimiterLayer};
+pub use keyed::{
+    ExtensionKey, HeaderKey, HeaderLimiterLayer, IpKey, IpLimiterLayer, KeyedLimiterLayer,
+};
 pub use shared::LimiterLayer;
 
 trait Policy {
